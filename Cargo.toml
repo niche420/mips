@@ -1,20 +1,26 @@
 [workspace]
 resolver = "2"
-members = ["mips_app", "mips_lib"]
+members = ["crates/mips-core", "crates/mips-desktop", "crates/mips-web"]
+
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+
+[workspace.dependencies]
+anyhow = "1.0.100"
+thiserror = "2.0.18"
 
 [profile.dev]
 debug = true
-## The emulator is not really usable without optims so we force them even for
-## debug builds
 overflow-checks = true
 
 [profile.release]
-debug = false
-# Disable parallel code generation. Increases build time but can improve
-# performance
-codegen-units = 1
-lto = true
-panic = 'abort'
-incremental = false
-overflow-checks = false
-opt-level = 3
+#debug = false
+## Disable parallel code generation. Increases build time but can improve
+## performance
+#codegen-units = 1
+#lto = true
+#panic = 'abort'
+#incremental = false
+#overflow-checks = false
+#opt-level = 3
