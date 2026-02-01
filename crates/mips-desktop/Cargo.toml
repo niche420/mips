@@ -6,12 +6,20 @@ edition.workspace = true
 [dependencies]
 mips-core.path = "../mips-core"
 anyhow.workspace = true
-bytemuck.workspace = true
-eframe = "0.33.3"
-egui = "0.33.3"
 thiserror = "2.0.11"
 tracing = "0.1.41"
 tracing-subscriber = "0.3.19"
+bytemuck = "1.23.0"
+
+# UI Framework
+eframe = "0.29"
+egui = "0.29"
+
+# Audio
+cpal = "0.15"
+
+# Input (gamepad support)
+gilrs = "0.10"
 
 [features]
 

@@ -1,6 +1,3 @@
-use tracing::info;
-use crate::app::App;
-
 mod error;
 mod audio;
 mod input;
@@ -9,12 +6,24 @@ mod wnd;
 mod evt;
 mod ui;
 
-fn main() -> anyhow::Result<()> {
+use anyhow::Result;
+
+fn main() -> Result<()> {
+    // Initialize logging
     tracing_subscriber::fmt::init();
-    info!("Begin log");
 
-    let mut app = App::new()?;
-    app.run();
+    // Configure the native window
+    let native_options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1280.0, 720.0])
+            .with_title("MIPS - PlayStation Emulator"),
+        ..Default::default()
+    };
 
-    Ok(())
+    // Run the app
+    eframe::run_native(
+        "MIPS",
+        native_options,
+        Box::new(|cc| Ok(Box::new(app::EmulatorApp::new(cc)))),
+    ).map_err(|e| anyhow::anyhow!("eframe error: {}", e))
 }
