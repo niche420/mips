@@ -14,7 +14,7 @@ pub trait Observer {
 }
 
 pub fn poll(app: &mut App) -> AppResult<()> {
-    let mut pump = app.wnd.ctx().event_pump()?;
+    let mut pump = app.ctx.event_pump()?;
     let events = pump.poll_iter();
     for e in events {
         match e {

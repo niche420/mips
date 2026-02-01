@@ -5,17 +5,21 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use sdl3::event::EventType;
-use sdl3::EventPump;
+use sdl3::{EventPump, Sdl};
 use tracing::info;
 use mips_core::ConsoleManager;
 use mips_core::input::{DeviceType, InputConfig};
 use crate::error::AppResult;
 use crate::{audio, evt, input, wnd};
 use crate::input::InputDeviceMap;
+use crate::ui::Ui;
 use crate::wnd::canvas::Canvas;
+use crate::wnd::Window;
 
 pub struct App {
+    pub(crate) ctx: Sdl,
     pub(crate) wnd: wnd::Window,
+    ui: Ui,
     
     mips: ConsoleManager,
     pub running: bool,
@@ -26,10 +30,9 @@ pub struct App {
 
 impl App {
     pub fn new() -> AppResult<Self> {
-        let wnd = wnd::Window::new()?;
-
-        tracing_subscriber::fmt::init();
-        info!("Begin log");
+        let ctx = sdl3::init()?;
+        let wnd = Window::new(&ctx)?;
+        let ui = Ui::new(&wnd)?;
 
         let sys_dir = env::current_dir().unwrap();
         let mut mips = ConsoleManager::new();
@@ -37,7 +40,9 @@ impl App {
         
         Ok(App {
             mips,
+            ctx,
             wnd,
+            ui,
             running: true,
             ports: [
                 input::Port::new(),
@@ -68,8 +73,7 @@ impl App {
         }
 
         // Audio stream: must be created and used in main thread
-        let ctx = self.wnd.ctx();
-        let audio = ctx.audio().unwrap();
+        let audio = self.ctx.audio().unwrap();
         let audio_device = audio::Device::from(audio);
         let mut audio_stream = audio::StreamWithCallback::from(audio_device);
         audio_stream.resume();
@@ -83,7 +87,6 @@ impl App {
             .expect("Failed to create texture");
 
         const FRAME_TIME: Duration = Duration::from_nanos(16_666_667); // ~60 FPS
-        let mut last_frame = Instant::now();
 
         // Main loop
         while self.running {
@@ -97,8 +100,8 @@ impl App {
             self.mips.update();
 
             // Render video frame
+            self.ui.render(&mut self.ctx, &self.wnd);
             if let Some(frame) = self.mips.get_frame() {
-                canvas.clear();
                 if frame.width != self.wnd.width() || frame.height != self.wnd.height() {
                     texture = texture_creator
                         .create_texture_static(
@@ -113,8 +116,7 @@ impl App {
                 let pixel_bytes: &[u8] = bytemuck::cast_slice(frame.pixels.as_slice());
 
                 texture.update(None, pixel_bytes, pitch).unwrap();
-                canvas.copy(&texture);
-                canvas.present();
+                self.ui.set_game_frame(&texture);
             }
 
             let btn_states = self.ports[0].inputs();
@@ -126,8 +128,6 @@ impl App {
             if elapsed < FRAME_TIME {
                 std::thread::sleep(FRAME_TIME - elapsed);
             }
-
-            last_frame = frame_start;
         }
     }
 }
