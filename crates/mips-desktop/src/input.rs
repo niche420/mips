@@ -5,15 +5,18 @@ use gilrs::{Gilrs, Button as GilrsButton, EventType};
 use tracing::info;
 
 pub struct InputManager {
-
+    // Store key states for direct polling without egui::Context
+    key_states: HashMap<String, bool>,
 }
 
 impl InputManager {
     pub fn new() -> Self {
-        Self {}
+        Self {
+            key_states: HashMap::new(),
+        }
     }
 
-    pub fn poll_input(&self, ctx: &egui::Context, button_map: &HashMap<String, Button>) -> ButtonQueue {
+    pub fn poll_input(&mut self, ctx: &egui::Context, button_map: &HashMap<String, Button>) -> ButtonQueue {
         let mut queue = Vec::new();
 
         // Check keyboard input
@@ -44,22 +47,33 @@ impl InputManager {
         queue
     }
 
+    pub fn poll_input_direct(&self, button_map: &HashMap<String, Button>) -> ButtonQueue {
+        // This is called during emulator updates when we don't have egui::Context
+        // Return empty queue as input is already handled via poll_input
+        Vec::new()
+    }
+
     fn check_key(
-        &self,
+        &mut self,
         input: &egui::InputState,
         key: Key,
         key_name: &str,
         button_map: &HashMap<String, Button>,
         queue: &mut ButtonQueue,
     ) {
-        if input.key_pressed(key) {
+        let is_down = input.key_down(key);
+        let was_down = self.key_states.get(key_name).copied().unwrap_or(false);
+
+        if is_down != was_down {
+            self.key_states.insert(key_name.to_string(), is_down);
+
             if let Some(button) = button_map.get(key_name) {
-                queue.push((ButtonState::Pressed, *button));
-            }
-        }
-        if input.key_released(key) {
-            if let Some(button) = button_map.get(key_name) {
-                queue.push((ButtonState::Released, *button));
+                let state = if is_down {
+                    ButtonState::Pressed
+                } else {
+                    ButtonState::Released
+                };
+                queue.push((state, *button));
             }
         }
     }

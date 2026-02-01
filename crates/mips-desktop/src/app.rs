@@ -21,6 +21,7 @@ pub struct EmulatorApp {
 
     // Rendering
     game_texture: Option<TextureHandle>,
+    cached_frame: Option<CachedFrame>,
 
     // UI state
     show_settings: bool,
@@ -32,8 +33,18 @@ pub struct EmulatorApp {
     settings: Settings,
 
     // Performance tracking
-    last_frame: Instant,
-    fps: f32,
+    last_emulator_update: Instant,
+    frame_debt: f64, // Track fractional frames
+    emulation_fps: f32,
+    emulation_frame_count: u32,
+    emulation_fps_timer: Instant,
+}
+
+#[derive(Clone)]
+struct CachedFrame {
+    rgba_pixels: Vec<u8>,
+    width: usize,
+    height: usize,
 }
 
 #[derive(Default)]
@@ -76,6 +87,7 @@ impl EmulatorApp {
             gamepad,
             button_map,
             game_texture: None,
+            cached_frame: None,
             show_settings: false,
             show_input_config: false,
             show_about: false,
@@ -86,8 +98,11 @@ impl EmulatorApp {
                 volume: 1.0,
                 fast_boot: false,
             },
-            last_frame: Instant::now(),
-            fps: 60.0,
+            last_emulator_update: Instant::now(),
+            frame_debt: 0.0,
+            emulation_fps: 60.0,
+            emulation_frame_count: 0,
+            emulation_fps_timer: Instant::now(),
         }
     }
 
@@ -96,13 +111,44 @@ impl EmulatorApp {
             return;
         }
 
+        const TARGET_FPS: f64 = 60.0;
+        const FRAME_TIME: f64 = 1.0 / TARGET_FPS;
+
+        let now = Instant::now();
+        let delta = now.duration_since(self.last_emulator_update).as_secs_f64();
+        self.last_emulator_update = now;
+
+        // Accumulate frame debt
+        self.frame_debt += delta / FRAME_TIME;
+
+        // Run emulator frames to pay off debt
+        // Limit to max 2 frames per update to prevent audio issues
+        let frames_to_run = self.frame_debt.floor().min(2.0) as u32;
+
+        for _ in 0..frames_to_run {
+            self.run_emulator_frame(ctx);
+            self.frame_debt -= 1.0;
+
+            // Count for FPS display
+            self.emulation_frame_count += 1;
+        }
+
+        // Update FPS counter
+        if self.emulation_fps_timer.elapsed() >= std::time::Duration::from_secs(1) {
+            self.emulation_fps = self.emulation_frame_count as f32;
+            self.emulation_frame_count = 0;
+            self.emulation_fps_timer = Instant::now();
+        }
+    }
+
+    fn run_emulator_frame(&mut self, ctx: &egui::Context) {
         // Handle input
         let mut button_queue = self.input.poll_input(ctx, &self.button_map);
         self.gamepad.poll_gamepad(&mut button_queue);
         self.mips.handle_inputs(button_queue);
         self.mips.refresh_devices();
 
-        // Update emulator
+        // Update emulator - ONE frame
         self.mips.update();
 
         // Handle audio
@@ -110,13 +156,25 @@ impl EmulatorApp {
         self.audio.queue_samples(audio_samples);
         self.mips.clear_audio_samples();
 
-        // Update FPS counter
-        let now = Instant::now();
-        let delta = now.duration_since(self.last_frame).as_secs_f32();
-        if delta > 0.0 {
-            self.fps = 0.9 * self.fps + 0.1 * (1.0 / delta);
+        // Cache the frame if we got a new one
+        if let Some(frame) = self.mips.get_frame() {
+            // Convert XRGB (0xAARRGGBB) to RGBA bytes
+            let rgba_pixels: Vec<u8> = frame.pixels.iter()
+                .flat_map(|&pixel| {
+                    let r = ((pixel >> 16) & 0xFF) as u8;
+                    let g = ((pixel >> 8) & 0xFF) as u8;
+                    let b = (pixel & 0xFF) as u8;
+                    let a = 255u8;
+                    [r, g, b, a]
+                })
+                .collect();
+
+            self.cached_frame = Some(CachedFrame {
+                rgba_pixels,
+                width: frame.width as usize,
+                height: frame.height as usize,
+            });
         }
-        self.last_frame = now;
     }
 
     fn render_menu_bar(&mut self, ctx: &egui::Context) {
@@ -172,9 +230,16 @@ impl EmulatorApp {
                     }
                 });
 
-                // FPS counter on the right
+                // FPS counter and VSync toggle on the right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(format!("FPS: {:.1}", self.fps));
+                    ui.label(format!("FPS: {:.0}", self.emulation_fps));
+                    ui.separator();
+
+                    // VSync toggle button
+                    let vsync_text = if self.settings.vsync { "VSync: ON" } else { "VSync: OFF" };
+                    if ui.button(vsync_text).clicked() {
+                        self.settings.vsync = !self.settings.vsync;
+                    }
                 });
             });
         });
@@ -182,11 +247,12 @@ impl EmulatorApp {
 
     fn render_game(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            if let Some(frame) = self.mips.get_frame() {
-                // Convert frame to egui ColorImage
-                let image = ColorImage::from_rgba_premultiplied(
-                    [frame.width as usize, frame.height as usize],
-                    bytemuck::cast_slice(&frame.pixels),
+            // Use cached frame to prevent flickering
+            if let Some(cached) = &self.cached_frame {
+                // Create ColorImage from cached RGBA data
+                let image = ColorImage::from_rgba_unmultiplied(
+                    [cached.width, cached.height],
+                    &cached.rgba_pixels,
                 );
 
                 // Update texture
@@ -205,7 +271,7 @@ impl EmulatorApp {
                 if let Some(texture) = &self.game_texture {
                     // Calculate size to maintain aspect ratio
                     let available_size = ui.available_size();
-                    let game_aspect = frame.width as f32 / frame.height as f32;
+                    let game_aspect = cached.width as f32 / cached.height as f32;
                     let available_aspect = available_size.x / available_size.y;
 
                     let display_size = if available_aspect > game_aspect {
@@ -343,7 +409,7 @@ impl EmulatorApp {
 
 impl eframe::App for EmulatorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Update emulator state
+        // Update emulator (adaptive timing)
         self.update_emulator(ctx);
 
         // Render UI
@@ -353,7 +419,7 @@ impl eframe::App for EmulatorApp {
         self.render_input_config(ctx);
         self.render_about(ctx);
 
-        // Request continuous repaints for smooth emulation
+        // Always request repaint to keep emulator running smoothly
         ctx.request_repaint();
     }
 }
