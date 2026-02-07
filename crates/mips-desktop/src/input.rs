@@ -47,12 +47,6 @@ impl InputManager {
         queue
     }
 
-    pub fn poll_input_direct(&self, button_map: &HashMap<String, Button>) -> ButtonQueue {
-        // This is called during emulator updates when we don't have egui::Context
-        // Return empty queue as input is already handled via poll_input
-        Vec::new()
-    }
-
     fn check_key(
         &mut self,
         input: &egui::InputState,

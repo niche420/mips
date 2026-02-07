@@ -123,7 +123,7 @@ impl AudioManager {
         buffer.extend_from_slice(&resampled);
 
         // Prevent buffer from growing too large
-        let max_size = (self.device_sample_rate as usize) * 2 * 2; // 2 seconds stereo
+        let max_size = (self.device_sample_rate as usize) * 2; // 2 for stereo
         if buffer.len() > max_size {
             let overflow = buffer.len() - max_size;
             buffer.drain(..overflow);
