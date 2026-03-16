@@ -1,5 +1,7 @@
 use log::info;
+use serde::{Deserialize, Serialize};
 
+#[derive(Serialize, Deserialize)]
 pub struct Tty(String);
 
 impl Tty {

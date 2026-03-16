@@ -1,0 +1,13 @@
+[video]
+vsync = true
+bilinear_filter = false
+window_width = 1280
+window_height = 720
+
+[audio]
+volume = 1.0
+enabled = true
+
+[system]
+fast_boot = false
+auto_save_state = true

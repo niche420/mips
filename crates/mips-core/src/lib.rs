@@ -31,7 +31,7 @@ impl ConsoleManager {
     pub fn new() -> Self {
         Self { active: None }
     }
-    
+
     pub fn load_game(&mut self, game_dir: &Path, disc: Option<&str>) -> MipsResult<()> {
         self.active = Some(Box::new(Ps1::new(game_dir, disc)?));
         Ok(())

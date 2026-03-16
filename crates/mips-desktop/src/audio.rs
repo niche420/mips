@@ -26,18 +26,18 @@ impl AudioManager {
             Ok(mut configs) => {
                 // Try to find 44100 Hz support
                 if let Some(cfg) = configs.find(|c| {
-                    c.min_sample_rate().0 <= 44100 && c.max_sample_rate().0 >= 44100
+                    c.min_sample_rate() <= 44100 && c.max_sample_rate() >= 44100
                 }) {
                     info!("Using native 44.1kHz");
                     StreamConfig {
                         channels: 2,
-                        sample_rate: SampleRate(44100),
+                        sample_rate: 44100,
                         buffer_size: cpal::BufferSize::Default,
                     }
                 } else {
                     // Use device default
                     let default = device.default_output_config()?;
-                    warn!("Device doesn't support 44.1kHz, using {} Hz", default.sample_rate().0);
+                    warn!("Device doesn't support 44.1kHz, using {} Hz", default.sample_rate());
                     StreamConfig {
                         channels: 2,
                         sample_rate: default.sample_rate(),
@@ -55,7 +55,7 @@ impl AudioManager {
             }
         };
 
-        let device_sample_rate = config.sample_rate.0;
+        let device_sample_rate = config.sample_rate;
         info!("Audio config: {} Hz, {} channels", device_sample_rate, config.channels);
 
         let buffer = Arc::new(Mutex::new(Vec::new()));

@@ -5,6 +5,7 @@ mod app;
 mod wnd;
 mod evt;
 mod ui;
+mod config;
 
 use anyhow::Result;
 
