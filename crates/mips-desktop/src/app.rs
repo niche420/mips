@@ -1,15 +1,20 @@
 use std::env;
 use std::time::Instant;
-use egui::{ColorImage, TextureHandle, TextureOptions};
+use egui::{ColorImage, TextureHandle, TextureOptions, Key};
 use tracing::info;
 use mips_core::ConsoleManager;
-use mips_core::input::{DeviceType, InputConfig};
+use mips_core::input::{DeviceType, Button};
 use crate::audio::AudioManager;
 use crate::input::{InputManager, GamepadManager};
+use crate::config::{ConfigManager, button_display_name, key_display_name};
+use gilrs::Button as GilrsButton;
 
 pub struct EmulatorApp {
     // Emulator core
     mips: ConsoleManager,
+
+    // Configuration
+    config: ConfigManager,
 
     // Audio
     audio: AudioManager,
@@ -17,7 +22,6 @@ pub struct EmulatorApp {
     // Input
     input: InputManager,
     gamepad: GamepadManager,
-    button_map: std::collections::HashMap<String, mips_core::input::Button>,
 
     // Rendering
     game_texture: Option<TextureHandle>,
@@ -29,12 +33,14 @@ pub struct EmulatorApp {
     show_about: bool,
     paused: bool,
 
-    // Settings
-    settings: Settings,
+    // Input config state
+    input_config_tab: InputConfigTab,
+    waiting_for_key: Option<Button>,
+    waiting_for_gamepad_button: Option<Button>,
 
     // Performance tracking
     last_emulator_update: Instant,
-    frame_debt: f64, // Track fractional frames
+    frame_debt: f64,
     emulation_fps: f32,
     emulation_frame_count: u32,
     emulation_fps_timer: Instant,
@@ -47,17 +53,18 @@ struct CachedFrame {
     height: usize,
 }
 
-#[derive(Default)]
-struct Settings {
-    vsync: bool,
-    bilinear_filter: bool,
-    volume: f32,
-    fast_boot: bool,
+#[derive(PartialEq)]
+enum InputConfigTab {
+    Keyboard,
+    Gamepad,
 }
 
 impl EmulatorApp {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         info!("Initializing MIPS emulator");
+
+        // Load configuration
+        let config = ConfigManager::new().expect("Failed to load configuration");
 
         // Load game
         let sys_dir = env::current_dir().unwrap();
@@ -68,36 +75,30 @@ impl EmulatorApp {
 
         // Setup input
         let input = InputManager::new();
-        let config = InputConfig::from("assets/config/profile.input.ini".as_ref());
-        let button_map = config.bindings();
+        let gamepad = GamepadManager::new();
 
         // Connect keyboard to port 0
         mips.connect_device(0, DeviceType::Keyboard);
 
         // Setup audio
-        let audio = AudioManager::new().expect("Failed to initialize audio");
-
-        // Setup gamepad
-        let gamepad = GamepadManager::new();
+        let mut audio = AudioManager::new().expect("Failed to initialize audio");
+        audio.set_volume(config.settings.audio.volume);
 
         Self {
             mips,
+            config,
             audio,
             input,
             gamepad,
-            button_map,
             game_texture: None,
             cached_frame: None,
             show_settings: false,
             show_input_config: false,
             show_about: false,
             paused: false,
-            settings: Settings {
-                vsync: true,
-                bilinear_filter: false,
-                volume: 1.0,
-                fast_boot: false,
-            },
+            input_config_tab: InputConfigTab::Keyboard,
+            waiting_for_key: None,
+            waiting_for_gamepad_button: None,
             last_emulator_update: Instant::now(),
             frame_debt: 0.0,
             emulation_fps: 60.0,
@@ -142,19 +143,23 @@ impl EmulatorApp {
     }
 
     fn run_emulator_frame(&mut self, ctx: &egui::Context) {
-        // Handle input
-        let mut button_queue = self.input.poll_input(ctx, &self.button_map);
-        self.gamepad.poll_gamepad(&mut button_queue);
-        self.mips.handle_inputs(button_queue);
-        self.mips.refresh_devices();
+        // Handle audio
+        if self.config.settings.audio.enabled {
+            let audio_samples = self.mips.get_audio_samples();
+            self.audio.enqueue(audio_samples);
+        }
+        self.mips.clear_audio_samples();
+
+        // Handle input (only if not configuring)
+        if !self.show_input_config {
+            let mut button_queue = self.input.poll_input(ctx, &self.config.keyboard_bindings.bindings);
+            self.gamepad.poll_gamepad(&mut button_queue, &self.config.gamepad_bindings.bindings);
+            self.mips.handle_inputs(button_queue);
+            self.mips.refresh_devices();
+        }
 
         // Update emulator - ONE frame
         self.mips.update();
-
-        // Handle audio
-        let audio_samples = self.mips.get_audio_samples();
-        self.audio.queue_samples(audio_samples);
-        self.mips.clear_audio_samples();
 
         // Cache the frame if we got a new one
         if let Some(frame) = self.mips.get_frame() {
@@ -187,6 +192,8 @@ impl EmulatorApp {
                     }
                     ui.separator();
                     if ui.button("Exit").clicked() {
+                        // Save settings before exit
+                        let _ = self.config.save_settings();
                         ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                     }
                 });
@@ -233,13 +240,6 @@ impl EmulatorApp {
                 // FPS counter and VSync toggle on the right
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.label(format!("FPS: {:.0}", self.emulation_fps));
-                    ui.separator();
-
-                    // VSync toggle button
-                    let vsync_text = if self.settings.vsync { "VSync: ON" } else { "VSync: OFF" };
-                    if ui.button(vsync_text).clicked() {
-                        self.settings.vsync = !self.settings.vsync;
-                    }
                 });
             });
         });
@@ -256,7 +256,7 @@ impl EmulatorApp {
                 );
 
                 // Update texture
-                let texture_options = if self.settings.bilinear_filter {
+                let texture_options = if self.config.settings.video.bilinear_filter {
                     TextureOptions::LINEAR
                 } else {
                     TextureOptions::NEAREST
@@ -308,25 +308,57 @@ impl EmulatorApp {
             .resizable(false)
             .show(ctx, |ui| {
                 ui.heading("Video");
-                ui.checkbox(&mut self.settings.vsync, "VSync");
-                ui.checkbox(&mut self.settings.bilinear_filter, "Bilinear Filtering");
+
+                let mut vsync_changed = false;
+                if ui.checkbox(&mut self.config.settings.video.vsync, "VSync").changed() {
+                    vsync_changed = true;
+                }
+
+                ui.checkbox(&mut self.config.settings.video.bilinear_filter, "Bilinear Filtering");
 
                 ui.separator();
                 ui.heading("Audio");
-                ui.add(
-                    egui::Slider::new(&mut self.settings.volume, 0.0..=1.0)
+
+                ui.checkbox(&mut self.config.settings.audio.enabled, "Enable Audio");
+
+                if ui.add(
+                    egui::Slider::new(&mut self.config.settings.audio.volume, 0.0..=1.0)
                         .text("Volume")
-                );
-                self.audio.set_volume(self.settings.volume);
+                ).changed() {
+                    self.audio.set_volume(self.config.settings.audio.volume);
+                }
 
                 ui.separator();
                 ui.heading("System");
-                ui.checkbox(&mut self.settings.fast_boot, "Skip BIOS");
+                ui.checkbox(&mut self.config.settings.system.fast_boot, "Skip BIOS");
+                ui.checkbox(&mut self.config.settings.system.auto_save_state, "Auto-save state on exit");
 
                 ui.separator();
-                if ui.button("Close").clicked() {
-                    self.show_settings = false;
-                }
+
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        if let Err(e) = self.config.save_settings() {
+                            tracing::error!("Failed to save settings: {}", e);
+                        }
+                        self.show_settings = false;
+                    }
+
+                    if ui.button("Reset to Defaults").clicked() {
+                        if let Err(e) = self.config.reset_to_defaults() {
+                            tracing::error!("Failed to reset settings: {}", e);
+                        }
+                        self.audio.set_volume(self.config.settings.audio.volume);
+                    }
+
+                    if ui.button("Cancel").clicked() {
+                        // Reload settings from disk
+                        if let Ok(new_config) = ConfigManager::new() {
+                            self.config = new_config;
+                            self.audio.set_volume(self.config.settings.audio.volume);
+                        }
+                        self.show_settings = false;
+                    }
+                });
             });
         self.show_settings = show_settings;
     }
@@ -336,57 +368,208 @@ impl EmulatorApp {
             return;
         }
 
+        let mut show_input_config = self.show_input_config;
+
         egui::Window::new("Input Configuration")
-            .open(&mut self.show_input_config)
+            .open(&mut show_input_config)
             .resizable(false)
+            .default_width(500.0)
             .show(ctx, |ui| {
-                ui.label("Keyboard controls");
-                ui.separator();
-
-                egui::Grid::new("input_grid")
-                    .num_columns(2)
-                    .spacing([40.0, 4.0])
-                    .show(ui, |ui| {
-                        ui.label("Action");
-                        ui.label("Key");
-                        ui.end_row();
-
-                        ui.label("D-Pad Up:");
-                        ui.label("↑");
-                        ui.end_row();
-
-                        ui.label("D-Pad Down:");
-                        ui.label("↓");
-                        ui.end_row();
-
-                        ui.label("D-Pad Left:");
-                        ui.label("←");
-                        ui.end_row();
-
-                        ui.label("D-Pad Right:");
-                        ui.label("→");
-                        ui.end_row();
-
-                        ui.label("Cross (X):");
-                        ui.label("Z");
-                        ui.end_row();
-
-                        ui.label("Circle (O):");
-                        ui.label("X");
-                        ui.end_row();
-
-                        ui.label("Square:");
-                        ui.label("A");
-                        ui.end_row();
-
-                        ui.label("Triangle:");
-                        ui.label("S");
-                        ui.end_row();
-                    });
+                // Tab selection
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.input_config_tab, InputConfigTab::Keyboard, "Keyboard");
+                    ui.selectable_value(&mut self.input_config_tab, InputConfigTab::Gamepad, "Gamepad");
+                });
 
                 ui.separator();
-                ui.label("Note: Input rebinding coming soon!");
+
+                match self.input_config_tab {
+                    InputConfigTab::Keyboard => self.render_keyboard_config(ui, ctx),
+                    InputConfigTab::Gamepad => self.render_gamepad_config(ui, ctx),
+                }
+
+                ui.separator();
+
+                ui.horizontal(|ui| {
+                    if ui.button("Save").clicked() {
+                        if let Err(e) = self.config.save_keyboard_bindings() {
+                            tracing::error!("Failed to save keyboard bindings: {}", e);
+                        }
+                        if let Err(e) = self.config.save_gamepad_bindings() {
+                            tracing::error!("Failed to save gamepad bindings: {}", e);
+                        }
+                        self.show_input_config = false;
+                        self.waiting_for_key = None;
+                        self.waiting_for_gamepad_button = None;
+                    }
+
+                    if ui.button("Reset to Defaults").clicked() {
+                        if let Err(e) = self.config.reset_to_defaults() {
+                            tracing::error!("Failed to reset bindings: {}", e);
+                        }
+                    }
+
+                    if ui.button("Cancel").clicked() {
+                        // Reload bindings from disk
+                        if let Ok(new_config) = ConfigManager::new() {
+                            self.config.keyboard_bindings = new_config.keyboard_bindings;
+                            self.config.gamepad_bindings = new_config.gamepad_bindings;
+                        }
+                        self.show_input_config = false;
+                        self.waiting_for_key = None;
+                        self.waiting_for_gamepad_button = None;
+                    }
+                });
             });
+
+        self.show_input_config = show_input_config;
+    }
+
+    fn render_keyboard_config(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if let Some(waiting_button) = self.waiting_for_key {
+            ui.label(format!("Press a key for {}...", button_display_name(&waiting_button)));
+            ui.label("(Press ESC to cancel)");
+
+            // Check for key press
+            ctx.input(|i| {
+                if i.key_pressed(Key::Escape) {
+                    self.waiting_for_key = None;
+                    return;
+                }
+
+                // Check for any key press
+                for key in [
+                    Key::A, Key::B, Key::C, Key::D, Key::E, Key::F, Key::G, Key::H,
+                    Key::I, Key::J, Key::K, Key::L, Key::M, Key::N, Key::O, Key::P,
+                    Key::Q, Key::R, Key::S, Key::T, Key::U, Key::V, Key::W, Key::X,
+                    Key::Y, Key::Z,
+                    Key::ArrowUp, Key::ArrowDown, Key::ArrowLeft, Key::ArrowRight,
+                    Key::Enter, Key::Space, Key::Backspace,
+                ] {
+                    if i.key_pressed(key) {
+                        // Remove old binding for this key
+                        self.config.keyboard_bindings.bindings.retain(|k, _| k != &key);
+                        // Add new binding
+                        self.config.keyboard_bindings.bindings.insert(key, waiting_button);
+                        self.waiting_for_key = None;
+                        return;
+                    }
+                }
+            });
+        } else {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("keyboard_grid")
+                    .num_columns(3)
+                    .spacing([10.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("Button");
+                        ui.label("Key");
+                        ui.label("");
+                        ui.end_row();
+
+                        // Define button order
+                        let buttons = [
+                            Button::DUp, Button::DDown, Button::DLeft, Button::DRight,
+                            Button::Cross, Button::Circle, Button::Square, Button::Triangle,
+                            Button::L1, Button::R1, Button::L2, Button::R2,
+                            Button::Start, Button::Select,
+                        ];
+
+                        for button in buttons {
+                            ui.label(button_display_name(&button));
+
+                            // Find current key binding
+                            let current_key = self.config.keyboard_bindings.bindings
+                                .iter()
+                                .find(|(_, b)| **b == button)
+                                .map(|(k, _)| *k);
+
+                            let key_text = current_key
+                                .map(|k| key_display_name(&k))
+                                .unwrap_or_else(|| "Unbound".to_string());
+
+                            ui.label(key_text);
+
+                            if ui.button("Change").clicked() {
+                                self.waiting_for_key = Some(button);
+                            }
+
+                            ui.end_row();
+                        }
+                    });
+            });
+        }
+    }
+
+    fn render_gamepad_config(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
+        if let Some(waiting_button) = self.waiting_for_gamepad_button {
+            ui.label(format!("Press a gamepad button for {}...", button_display_name(&waiting_button)));
+            ui.label("(Press any key to cancel)");
+
+            // Check for gamepad button press
+            if let Some(gilrs) = &mut self.gamepad.gilrs {
+                while let Some(event) = gilrs.next_event() {
+                    if let gilrs::EventType::ButtonPressed(gilrs_button, _) = event.event {
+                        // Remove old binding for this button
+                        self.config.gamepad_bindings.bindings.retain(|b, _| b != &gilrs_button);
+                        // Add new binding
+                        self.config.gamepad_bindings.bindings.insert(gilrs_button, waiting_button);
+                        self.waiting_for_gamepad_button = None;
+                        return;
+                    }
+                }
+            }
+
+            // Check for cancel
+            ctx.input(|i| {
+                if !i.keys_down.is_empty() {
+                    self.waiting_for_gamepad_button = None;
+                }
+            });
+        } else {
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                egui::Grid::new("gamepad_grid")
+                    .num_columns(3)
+                    .spacing([10.0, 4.0])
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.label("PS1 Button");
+                        ui.label("Gamepad Button");
+                        ui.label("");
+                        ui.end_row();
+
+                        let buttons = [
+                            Button::DUp, Button::DDown, Button::DLeft, Button::DRight,
+                            Button::Cross, Button::Circle, Button::Square, Button::Triangle,
+                            Button::L1, Button::R1, Button::L2, Button::R2,
+                            Button::Start, Button::Select,
+                        ];
+
+                        for button in buttons {
+                            ui.label(button_display_name(&button));
+
+                            // Find current gamepad binding
+                            let current_gilrs = self.config.gamepad_bindings.bindings
+                                .iter()
+                                .find(|(_, b)| **b == button)
+                                .map(|(g, _)| *g);
+
+                            let gilrs_text = current_gilrs
+                                .map(|g| format!("{:?}", g))
+                                .unwrap_or_else(|| "Unbound".to_string());
+
+                            ui.label(gilrs_text);
+
+                            if ui.button("Change").clicked() {
+                                self.waiting_for_gamepad_button = Some(button);
+                            }
+
+                            ui.end_row();
+                        }
+                    });
+            });
+        }
     }
 
     fn render_about(&mut self, ctx: &egui::Context) {
@@ -401,6 +584,9 @@ impl EmulatorApp {
                 ui.heading("MIPS PlayStation Emulator");
                 ui.separator();
                 ui.label("A PlayStation 1 emulator written in Rust");
+                ui.label("Using egui for UI and cpal for audio");
+                ui.separator();
+                ui.label(format!("Version: {}", env!("CARGO_PKG_VERSION")));
                 ui.separator();
                 ui.hyperlink_to("GitHub", "https://github.com/yourusername/mips");
             });
@@ -419,7 +605,11 @@ impl eframe::App for EmulatorApp {
         self.render_input_config(ctx);
         self.render_about(ctx);
 
-        // Always request repaint to keep emulator running smoothly
-        ctx.request_repaint();
+        // Request repaint based on vsync setting
+        if self.config.settings.video.vsync {
+            ctx.request_repaint_after(std::time::Duration::from_secs_f64(1.0/60.0));
+        } else {
+            ctx.request_repaint();
+        }
     }
 }

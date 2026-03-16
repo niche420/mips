@@ -8,7 +8,9 @@ version = "0.1.0"
 
 [workspace.dependencies]
 anyhow = "1.0.100"
+serde = { version = "1.0", features = ["derive"] }
 thiserror = "2.0.18"
+tracing = "0.1.44"
 
 [profile.dev]
 debug = true
