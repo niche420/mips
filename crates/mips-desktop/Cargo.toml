@@ -12,14 +12,15 @@ tracing-subscriber = "0.3.19"
 bytemuck = "1.23.0"
 
 serde.workspace = true
-toml = "0.9.11+spec-1.1.0"
+toml = "1.0.6+spec-1.1.0"
 
 # UI Framework
 eframe = "0.33.3"
 egui = "0.33.3"
 
 # Audio
-cpal = "0.17.1"
+cpal = "0.17.3"
+rodio = { version = "0.22.2", features = ["playback"] }
 
 # Input (gamepad support)
 gilrs = "0.11.1"

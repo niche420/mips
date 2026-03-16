@@ -81,7 +81,7 @@ impl EmulatorApp {
         mips.connect_device(0, DeviceType::Keyboard);
 
         // Setup audio
-        let audio = AudioManager::new().expect("Failed to initialize audio");
+        let mut audio = AudioManager::new().expect("Failed to initialize audio");
         audio.set_volume(config.settings.audio.volume);
 
         Self {
@@ -143,6 +143,13 @@ impl EmulatorApp {
     }
 
     fn run_emulator_frame(&mut self, ctx: &egui::Context) {
+        // Handle audio
+        if self.config.settings.audio.enabled {
+            let audio_samples = self.mips.get_audio_samples();
+            self.audio.enqueue(audio_samples);
+        }
+        self.mips.clear_audio_samples();
+
         // Handle input (only if not configuring)
         if !self.show_input_config {
             let mut button_queue = self.input.poll_input(ctx, &self.config.keyboard_bindings.bindings);
@@ -153,15 +160,6 @@ impl EmulatorApp {
 
         // Update emulator - ONE frame
         self.mips.update();
-
-        // Handle audio
-        if self.config.settings.audio.enabled {
-            let audio_samples = self.mips.get_audio_samples();
-            self.audio.queue_samples(audio_samples);
-            self.mips.clear_audio_samples();
-        } else {
-            self.mips.clear_audio_samples();
-        }
 
         // Cache the frame if we got a new one
         if let Some(frame) = self.mips.get_frame() {
